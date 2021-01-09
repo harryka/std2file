@@ -39,6 +39,7 @@ static int g_debug_info_dump = 0;
 static long long g_single_file_max_size = DEFAULT_SINGLE_FILE_MAX_SIZE;
 static long long g_all_file_max_size = DEFAULT_ALL_FILES_MAX_SIZE;
 static char *g_log_file_prefix = "slog";
+static char *g_log_file_symbol = "slog.log";
 static char *g_log_base_path = "./";
 static FILE *g_log_file_handler = NULL;
 
@@ -185,6 +186,30 @@ int gen_log_file_name(const char *basePath, const char *filePrefix, Logfile_Item
     return 0;
 }
 
+int relink_to_file(const char *file_path, const char *sym_name) {
+    int ret;
+    struct stat buf;
+    int result;
+
+    result = lstat(sym_name, &buf);
+    if (result == 0) {
+        ret = remove(sym_name);
+        slog_debug("remove symbol file %s\n", sym_name);
+        if (ret != 0) {
+            slog_debug("error number string:%s\n", strerror(errno));
+            perror("remove file fail\n");
+            return -1;
+        }
+    }
+    ret = symlink(file_path, sym_name);
+    if (ret != 0) {
+        slog_debug("error number string:%s\n", strerror(errno));
+        perror("remove file fail\n");
+        return -2;
+    }
+    return 0;
+}
+
 int truncate_log_files() {
     slog_debug("check g_logfile_size_sum:%lld\n", (long long)g_logfile_size_sum);
     while ((g_logfile_size_sum + g_single_file_max_size) > g_all_file_max_size) {
@@ -313,6 +338,9 @@ int main(int argc, char *argv[]) {
     sigaction(SIGINT, &(struct sigaction){sigint_handler}, NULL);
     sigaction(SIGTERM, &(struct sigaction){sigterm_handler}, NULL);
 
+    g_log_file_symbol = calloc(1, FILENAME_MAX + 1);
+    snprintf(g_log_file_symbol, FILENAME_MAX, "%s/%s.log", g_log_base_path, g_log_file_prefix);
+
     list_log_files(g_log_base_path, g_log_file_prefix);
 
     truncate_log_files();
@@ -348,6 +376,10 @@ int main(int argc, char *argv[]) {
                 perror(logfileItem.absFileName);
                 perror("file open fail\n");
                 return 2;
+            }
+            ret = relink_to_file(logfileItem.absFileName, g_log_file_symbol);
+            if (ret !=0 ) {
+                perror("link to new file fail\n");
             }
         }
 
