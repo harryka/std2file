@@ -295,7 +295,7 @@ void usage() {
             " [-d] dump process step debug info\n");
 }
 
-int main(int argc, char *argv[]) {
+int parse_arguments(int argc, char *argv[]) {
     char opt;
     while ((opt = (char)getopt(argc, argv, "b:p:a:s:d")) != -1) {
         switch (opt) {
@@ -327,6 +327,15 @@ int main(int argc, char *argv[]) {
     }
     printf("base dir:%s, log file prefix:%s, single file max size:%lld, all file sum max size:%lld\n",
            g_log_base_path, g_log_file_prefix, (long long)g_single_file_max_size, (long long)g_all_file_max_size);
+    return 0;
+}
+
+int main(int argc, char *argv[]) {
+    int ret = 0;
+    ret = parse_arguments(argc, argv);
+    if (ret != 0) {
+        return 1;
+    }
 
     int current_file_size = 0;
     Logfile_Item logfileItem = {0};
