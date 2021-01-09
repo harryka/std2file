@@ -3,6 +3,15 @@ project(std2file C)
 
 set(CMAKE_C_STANDARD 99)
 
+set(C_FLAGS
+        -g
+        -Wall
+        -Wextra
+        -Werror
+        -Wconversion
+        -Wno-unused-parameter
+        -Wold-style-cast
+        )
 set(CXX_FLAGS
         -g
         # -DVALGRIND

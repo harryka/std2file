@@ -3,34 +3,48 @@
 #include <string.h>
 #define __USE_XOPEN
 #include <time.h>
-#include <sys/types.h>
 #include <dirent.h>
 #include <sys/stat.h>
 #include <signal.h>
 #include <errno.h>
 #include <unistd.h>
-#include <sys/time.h>
+#include <stdarg.h>
 
-#define READ_BUFFER_MAX_SIZE 1000*1000
+#define DEFAULT_READ_BUFFER_MAX_SIZE 10*1000
+#define DEFAULT_SINGLE_FILE_MAX_SIZE 1*1024*1024
+#define DEFAULT_ALL_FILES_MAX_SIZE 10*1024*1024
 
-#define DEBUG_STDIN_TO_CONST_STRING 0
+#define DEBUG_STD_INPUT_TO_CONST_STRING 0
+
+void slog_debug(const char*fmt, ...);
 
 /*
  * full file name,size,timestamp,formatted time string
  */
 typedef struct _logfile_item {
-    char absFileName[128];
+    char absFileName[128 + 1];
     ssize_t fileSize;
     time_t timeStamp;
     struct _logfile_item *next;
     struct _logfile_item *prev;
 }Logfile_Item;
+
+
 static Logfile_Item g_logfile_list_head = {0};
 static Logfile_Item *g_logfile_list_tail = NULL;
 static long long g_logfile_size_sum = 0;
 
+
+static int g_debug_info_dump = 0;
+static long long g_single_file_max_size = DEFAULT_SINGLE_FILE_MAX_SIZE;
+static long long g_all_file_max_size = DEFAULT_ALL_FILES_MAX_SIZE;
+static char *g_log_file_prefix = "slog";
+static char *g_log_base_path = "./";
+static FILE *g_log_file_handler = NULL;
+
+
 int add_head_logfile(Logfile_Item *logfileItem) {
-    printf("%s: filename:%s, timeStamp:%jd, filesize:%ld\n", __func__ , logfileItem->absFileName, logfileItem->timeStamp, logfileItem->fileSize);
+    slog_debug("%s: filename:%s, timeStamp:%jd, filesize:%ld\n", __func__ , logfileItem->absFileName, logfileItem->timeStamp, logfileItem->fileSize);
     Logfile_Item * log_file_item = calloc(1, sizeof(Logfile_Item));
     if (log_file_item == NULL) {
         perror("memory alloc fail\n");
@@ -39,7 +53,6 @@ int add_head_logfile(Logfile_Item *logfileItem) {
     memcpy(log_file_item, logfileItem, sizeof(Logfile_Item));
 
     Logfile_Item *cur_logfile = &g_logfile_list_head;
-    Logfile_Item *next_logfile = NULL;
     while (cur_logfile->next != NULL) {
         if (cur_logfile->next->timeStamp < log_file_item->timeStamp) {
             log_file_item->next = cur_logfile->next;
@@ -60,7 +73,7 @@ int add_head_logfile(Logfile_Item *logfileItem) {
         g_logfile_list_tail = log_file_item;
     }
 
-    printf("%s:%lld,%lld\n", __func__ , (long long)g_logfile_size_sum , (long long)log_file_item->fileSize);
+    slog_debug("%s:%lld,%lld\n", __func__ , (long long)g_logfile_size_sum , (long long)log_file_item->fileSize);
     g_logfile_size_sum += log_file_item->fileSize;
 
     return 0;
@@ -118,14 +131,14 @@ int list_log_files(const char *basePath,const char *filePrefix) {
 
                 memset(abs_filename_tail, 0, 128);
                 strncpy(abs_filename_tail, ep->d_name + strlen(filePrefix) + 1, 19);
-//                printf("abs_filename_tail:%s\n", abs_filename_tail);
+                slog_debug("abs_filename_tail:%s\n", abs_filename_tail);
                 strptime(abs_filename_tail, "%Y-%m-%d_%H-%M-%S", &tm);
                 time_t timestamp = mktime(&tm);
 
-//                printf("%s,size:%d,timestamp:%jd\n", abs_filename, sb.st_size, timestamp);
+                slog_debug("%s,size:%d,timestamp:%jd\n", abs_filename, sb.st_size, timestamp);
 
                 memset(&logfileItem, 0, sizeof(Logfile_Item));
-                strcpy(logfileItem.absFileName,abs_filename);
+                strncpy(logfileItem.absFileName,abs_filename, 124);
                 logfileItem.fileSize = sb.st_size;
                 logfileItem.timeStamp = timestamp;
 
@@ -158,42 +171,70 @@ int gen_log_file_name(const char *basePath, const char *filePrefix, Logfile_Item
     }
 
     if (strftime(file_name, 128, "%Y-%m-%d_%H-%M-%S", tmp) == 0) {
-        fprintf(stderr, "strftime returned 0");
+        fprintf(stderr, "time format to string return 0");
         exit(EXIT_FAILURE);
     }
-//    printf("%s\n", file_name);
+    slog_debug("gen filename:%s\n", file_name);
 
     snprintf(logfileItem->absFileName, sizeof(logfileItem->absFileName),
             "%s/%s_%s.log", basePath, filePrefix, file_name);
     logfileItem->timeStamp = t;
 
-//    printf("%s\n", logfileItem->absFileName);
+    slog_debug("gen full file path %s\n", logfileItem->absFileName);
 
     return 0;
 }
 
-FILE *fp = NULL;
+int truncate_log_files() {
+    slog_debug("check g_logfile_size_sum:%lld\n", (long long)g_logfile_size_sum);
+    while ((g_logfile_size_sum + g_single_file_max_size) > g_all_file_max_size) {
+        Logfile_Item logfileItem;
+        int ret = retrieve_tail_logfile(&logfileItem);
+        if (ret != 0) {
+            perror("retrieve file fail\n");
+        } else {
+            ret = remove(logfileItem.absFileName);
+            printf("remove file %s\n", logfileItem.absFileName);
+            if (ret != 0) {
+                printf("error number string:%s\n", strerror(errno));
+                perror("remove file fail\n");
+            }
+            slog_debug("check g_logfile_size_sum:%lld\n", (long long)g_logfile_size_sum);
+        }
+    }
+    return 0;
+}
+
+void sigterm_handler(int sig) {
+    if (g_log_file_handler != NULL) {
+        fflush(g_log_file_handler);
+        fclose(g_log_file_handler);
+        g_log_file_handler = NULL;
+    }
+    printf("pipe signal:%d\n", sig);
+    exit(0);
+}
 
 void sigpipe_handler(int unused)
 {
-    if (fp != NULL) {
-        fflush(fp);
-        fclose(fp);
-        fp = NULL;
+    if (g_log_file_handler != NULL) {
+        fflush(g_log_file_handler);
+        fclose(g_log_file_handler);
+        g_log_file_handler = NULL;
     }
-    printf("pipe signal\n");
+    printf("pipe signal:%d\n", unused);
     exit(0);
 }
 void sigint_handler(int unused)
 {
-    printf("int signal\n");
+    printf("int signal:%d\n", unused);
 }
 
 long long convert2byte(const char *sizeStr) {
     long long ret_size = 1;
     int last_index = 0;
-    char max_size_str[128] = {0};
-    strcpy(max_size_str, sizeStr);
+    char max_size_str[128 + 1] = {0};
+    strncpy(max_size_str, sizeStr, 128);
     last_index = strlen(max_size_str) - 1;
     switch (max_size_str[last_index]) {
         case 'k':
@@ -220,84 +261,81 @@ long long convert2byte(const char *sizeStr) {
     return ret_size;
 }
 
-int main(int argc, char *argv[]) {
-    long long single_file_max_size = 10;
-    long long all_file_max_size = 3*10;
-    char *log_file_prefix = "stdlog";
-    char *log_base_path = "/tmp/log";
+void usage() {
+    fprintf(stderr,
+            "Usage: std2file [-b base dir path]"
+            " [-p] prefix of log file name"
+            " [-a] all files max size"
+            " [-s] single file max size"
+            " [-d] dump process step debug info\n");
+}
 
+int main(int argc, char *argv[]) {
     char opt;
-    while ((opt = getopt(argc, argv, "b:p:a:s:")) != -1) {
+    while ((opt = (char)getopt(argc, argv, "b:p:a:s:d")) != -1) {
         switch (opt) {
             case 'b':
-                log_base_path = strdup(optarg);
+                g_log_base_path = strdup(optarg);
                 break;
             case 'p':
-                log_file_prefix = strdup(optarg);
+                g_log_file_prefix = strdup(optarg);
                 break;
             case 'a':
-                all_file_max_size = convert2byte(optarg);
+                g_all_file_max_size = convert2byte(optarg);
                 break;
             case 's':
-                single_file_max_size = convert2byte(optarg);
+                g_single_file_max_size = convert2byte(optarg);
                 break;
+            case 'd':
+                g_debug_info_dump = 1;
+                break;
+            case '?':
             default: /* '?' */
-                fprintf(stderr, "Usage: %s [-b base dir path]"
-                                " [-p] prefix of log file name"
-                                " [-a] all files max size"
-                                " [-s] single file max size\n",
-                        argv[0]);
+                usage();
                 exit(EXIT_FAILURE);
         }
     }
+    if (g_single_file_max_size > g_all_file_max_size) {
+        printf("g_single_file_max_size:%lld greater than g_all_file_max_size:%lld\n",
+               (long long)g_single_file_max_size, (long long)g_all_file_max_size);
+        return -1;
+    }
     printf("base dir:%s, log file prefix:%s, single file max size:%lld, all file sum max size:%lld\n",
-            log_base_path, log_file_prefix, (long long)single_file_max_size, (long long)all_file_max_size);
+           g_log_base_path, g_log_file_prefix, (long long)g_single_file_max_size, (long long)g_all_file_max_size);
 
     int current_file_size = 0;
     Logfile_Item logfileItem = {0};
-    char *read_buffer = calloc(1, READ_BUFFER_MAX_SIZE);
+    char *read_buffer = calloc(1, DEFAULT_READ_BUFFER_MAX_SIZE);
 
     printf("star logging\n");
 
     sigaction(SIGPIPE, &(struct sigaction){sigpipe_handler}, NULL);
     sigaction(SIGINT, &(struct sigaction){sigint_handler}, NULL);
+    sigaction(SIGTERM, &(struct sigaction){sigterm_handler}, NULL);
 
-    list_log_files(log_base_path, log_file_prefix);
+    list_log_files(g_log_base_path, g_log_file_prefix);
+
+    truncate_log_files();
 
     if (NULL == read_buffer) {
         perror("read buffer alloc memory fail\n");
         return 1;
     }
     while (1) {
-        printf("");
-        if (current_file_size >= single_file_max_size) {
-            fclose(fp);
-            fp = NULL;
+        if (current_file_size >= g_single_file_max_size) {
+            fclose(g_log_file_handler);
+            g_log_file_handler = NULL;
             logfileItem.fileSize = current_file_size;
-//            printf("logfileItem.fileSize:%d\n", logfileItem.fileSize);
+            slog_debug("close file:%s,file size:%lld\n", logfileItem.absFileName, (long long)logfileItem.fileSize);
             add_head_logfile(&logfileItem);
             current_file_size = 0;
         }
-        if (fp == NULL) {
+        if (g_log_file_handler == NULL) {
             current_file_size = 0;
-            printf("check g_logfile_size_sum:%lld\n", (long long)g_logfile_size_sum);
-            if ((g_logfile_size_sum + single_file_max_size) > all_file_max_size) {
-                Logfile_Item logfileItem;
-                int ret = retrieve_tail_logfile(&logfileItem);
-                if (ret != 0) {
-                    perror("retrive file fail\n");
-                } else {
-                    ret = remove(logfileItem.absFileName);
-                    printf("remove file %s\n", logfileItem.absFileName);
-                    if (ret != 0) {
-                        printf("error number string:%s\n", strerror(errno));
-                        perror("remove file fail\n");
-                    }
-                }
-            }
+            truncate_log_files();
 
             memset(&logfileItem, 0, sizeof(Logfile_Item));
-            int ret = gen_log_file_name(log_base_path, log_file_prefix, &logfileItem);
+            int ret = gen_log_file_name(g_log_base_path, g_log_file_prefix, &logfileItem);
             if (ret !=0) {
                 perror("gen file fail\n");
                 return 3;
@@ -305,32 +343,41 @@ int main(int argc, char *argv[]) {
                 printf("gen file:%s\n", logfileItem.absFileName);
             }
 
-            fp = fopen(logfileItem.absFileName, "w");
-            if (fp == NULL) {
+            g_log_file_handler = fopen(logfileItem.absFileName, "w");
+            if (g_log_file_handler == NULL) {
                 perror(logfileItem.absFileName);
                 perror("file open fail\n");
                 return 2;
             }
         }
 
-        memset(read_buffer, 0, READ_BUFFER_MAX_SIZE);
+        memset(read_buffer, 0, DEFAULT_READ_BUFFER_MAX_SIZE);
         char *read_line = NULL;
-#if DEBUG_STDIN_TO_CONST_STRING
+#if DEBUG_STD_INPUT_TO_CONST_STRING
         sleep(1);
         readline = "1234567890a";
-        strncpy(read_buffer, READ_BUFFER_MAX_SIZE, read_line);
+        strncpy(read_buffer, DEFAULT_READ_BUFFER_MAX_SIZE, read_line);
 #else
-        read_line = fgets(read_buffer, READ_BUFFER_MAX_SIZE, stdin);
+        read_line = fgets(read_buffer, DEFAULT_READ_BUFFER_MAX_SIZE, stdin);
 #endif
         if (read_line == NULL) {
-            fflush(fp);
-            fclose(fp);
-            printf("fgets NULL\n");
+            fflush(g_log_file_handler);
+            fclose(g_log_file_handler);
+            printf("get from std input NULL\n");
             return 0;
         }
-        fputs(read_buffer, fp);
-        fflush(fp);
+        fputs(read_buffer, g_log_file_handler);
+        fflush(g_log_file_handler);
         current_file_size += strlen(read_buffer);
     }
     return 0;
+}
+
+void slog_debug(const char*fmt, ...) {
+    if (g_debug_info_dump==1) {
+        va_list vaList;
+        va_start(vaList, fmt);
+        vprintf(fmt, vaList);
+        va_end(vaList);
+    }
 }
